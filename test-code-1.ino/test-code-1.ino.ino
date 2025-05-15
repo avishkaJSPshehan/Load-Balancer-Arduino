@@ -1,31 +1,17 @@
-/*
-   -------------------------------------------------------------------------------------
-   HX711_ADC
-   Arduino library for HX711 24-Bit Analog-to-Digital Converter for Weight Scales
-   Olav Kallhovd sept2017
-   -------------------------------------------------------------------------------------
-*/
-
-/*
-   Settling time (number of samples) and data filtering can be adjusted in the config.h file
-   For calibration and storing the calibration value in eeprom, see example file "Calibration.ino"
-
-   The update() function checks for new data and starts the next conversion. In order to acheive maximum effective
-   sample rate, update() should be called at least as often as the HX711 sample rate; >10Hz@10SPS, >80Hz@80SPS.
-   If you have other time consuming code running (i.e. a graphical LCD), consider calling update() from an interrupt routine,
-   see example file "Read_1x_load_cell_interrupt_driven.ino".
-
-   This is an example sketch on how to use this library
-*/
-
+#include <Wire.h>
+#include <MPU6050.h>
 #include <HX711_ADC.h>
 #if defined(ESP8266)|| defined(ESP32) || defined(AVR)
 #include <EEPROM.h>
 #endif
 
-//pins:
-const int HX711_dout = 2; //mcu > HX711 dout pin
-const int HX711_sck = 3; //mcu > HX711 sck pin
+MPU6050 mpu;
+
+// Pins for HX711
+const int HX711_dout1 = 2;
+const int HX711_sck1 = 3;
+const int HX711_dout2 = 4;
+const int HX711_sck2 = 5;
 
 // Motor A connections
 const int ENA = 10;
@@ -37,91 +23,139 @@ const int ENB = 11;
 const int IN3 = 8;
 const int IN4 = 9;
 
-//HX711 constructor:
-HX711_ADC LoadCell(HX711_dout, HX711_sck);
+// HX711 instances
+HX711_ADC LoadCell1(HX711_dout1, HX711_sck1);
+HX711_ADC LoadCell2(HX711_dout2, HX711_sck2);
 
 const int calVal_eepromAdress = 0;
 unsigned long t = 0;
 
 void setup() {
-  Serial.begin(9600); delay(10);
-  Serial.println();
-  Serial.println("Starting...");
+  Serial.begin(9600);
+  Wire.begin();
 
+  // Initialize MPU6050
+  mpu.initialize();
+  if (mpu.testConnection()) {
+    Serial.println("MPU6050 connected successfully!");
+  } else {
+    Serial.println("MPU6050 connection failed!");
+    while (1);
+  }
+
+  // Initialize Load Cells
+  LoadCell1.begin();
+  LoadCell2.begin();
+
+  float calibrationValue = 696.0;
+  EEPROM.get(calVal_eepromAdress, calibrationValue);
+
+  LoadCell1.start(2000, true);
+  LoadCell2.start(2000, true);
+
+  LoadCell1.setCalFactor(calibrationValue);
+  LoadCell2.setCalFactor(calibrationValue);
+
+  // Motor setup
   pinMode(ENA, OUTPUT);
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
-  
   pinMode(ENB, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
 
-  LoadCell.begin();
-  //LoadCell.setReverseOutput(); //uncomment to turn a negative output value to positive
-  float calibrationValue; // calibration value (see example file "Calibration.ino")
-  calibrationValue = 696.0; // uncomment this if you want to set the calibration value in the sketch
-#if defined(ESP8266)|| defined(ESP32)
-  //EEPROM.begin(512); // uncomment this if you use ESP8266/ESP32 and want to fetch the calibration value from eeprom
-#endif
-  EEPROM.get(calVal_eepromAdress, calibrationValue); // uncomment this if you want to fetch the calibration value from eeprom
-
-  unsigned long stabilizingtime = 2000; // preciscion right after power-up can be improved by adding a few seconds of stabilizing time
-  boolean _tare = true; //set this to false if you don't want tare to be performed in the next step
-  LoadCell.start(stabilizingtime, _tare);
-  if (LoadCell.getTareTimeoutFlag()) {
-    Serial.println("Timeout, check MCU>HX711 wiring and pin designations");
-    while (1);
-  }
-  else {
-    LoadCell.setCalFactor(calibrationValue); // set calibration value (float)
-    Serial.println("Startup is complete");
-  }
+  Serial.println("Startup is complete");
 }
 
 void loop() {
-  static boolean newDataReady = 0;
-  const int serialPrintInterval = 0; //increase value to slow down serial print activity
+  // MPU6050 readings
+  int16_t ax, ay, az;
+  mpu.getAcceleration(&ax, &ay, &az);
 
-  // check for new data/start next conversion:
-  if (LoadCell.update()) newDataReady = true;
+  // Only values for Serial Plotter
+  
 
-  // get smoothed value from the dataset:
-  if (newDataReady) {
-    if (millis() > t + serialPrintInterval) {
-      float i = LoadCell.getData();
-      Serial.print("Load_cell output val: ");
-      Serial.println(i);
+  // Load Cell readings
+  if (LoadCell1.update() && LoadCell2.update()) {
+    float value1 = LoadCell1.getData();
+    float value2 = LoadCell2.getData();
 
-      if (i>10){
-          digitalWrite(IN1, LOW);
-          digitalWrite(IN2, HIGH);
-          digitalWrite(IN3, LOW);
-          digitalWrite(IN4, HIGH);
-          analogWrite(ENA, 50);
-          analogWrite(ENB, 50);
-      }else{
-        digitalWrite(IN1, LOW);
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, LOW);
-        digitalWrite(IN4, LOW);
-        analogWrite(ENA, 0);
-        analogWrite(ENB, 0);
-      }
+    Serial.print(ax); Serial.print("\t");
+    Serial.print(ay); Serial.print("\t");
+    Serial.print(az); Serial.print("\t");
 
-      newDataReady = 0;
-      t = millis();
+    // Serial.print("Load_cell1 output: ");
+    Serial.print(value1);
+    Serial.print("\t	");
+    // Serial.print("Load_cell2 output: ");
+    Serial.println(value2);
+
+    // Motor control
+    controlMotor(value1, value2);
+  }
+
+  if (Serial.available() > 0) {
+    char inByte = Serial.read();
+    if (inByte == 't') {
+      LoadCell1.tareNoDelay();
+      LoadCell2.tareNoDelay();
     }
   }
 
-  // receive command from serial terminal, send 't' to initiate tare operation:
-  if (Serial.available() > 0) {
-    char inByte = Serial.read();
-    if (inByte == 't') LoadCell.tareNoDelay();
-  }
-
-  // check if last tare operation is complete:
-  if (LoadCell.getTareStatus() == true) {
+  if (LoadCell1.getTareStatus() && LoadCell2.getTareStatus()) {
     Serial.println("Tare complete");
   }
 
+  delay(50);
+}
+
+void controlMotor(float value1, float value2) {
+  if (value1 > 40) { 
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, HIGH);
+      digitalWrite(IN3, HIGH);
+      digitalWrite(IN4, LOW);
+      analogWrite(ENA, 180);
+      analogWrite(ENB, 180);
+      delay(100);
+
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, LOW);
+      analogWrite(ENA, 0);
+      analogWrite(ENB, 0);
+    } else {
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, LOW);
+      analogWrite(ENA, 0);
+      analogWrite(ENB, 0);
+    }
+
+    if (value2 > 25) { 
+
+      digitalWrite(IN1, HIGH);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, HIGH);
+      analogWrite(ENA, 180);
+      analogWrite(ENB, 180);
+      delay(100);
+
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, LOW);
+      analogWrite(ENA, 0);
+      analogWrite(ENB, 0);
+    } else {
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, LOW);
+      analogWrite(ENA, 0);
+      analogWrite(ENB, 0);
+    }
 }
